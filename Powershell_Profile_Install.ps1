@@ -2,7 +2,7 @@
 <#
 PS1nstaller - PowerShell profile/bootstrap installer
 Author: Ox1d3x3
-Version: 2.5.3
+Version: 2.5.6
 
 Fixes in 2.5.1:
 - Copies profile pack to BOTH:
@@ -12,6 +12,11 @@ Fixes in 2.5.1:
 - Hardened Scoop bucket detection (handles string + object output)
 - Fully automated Nerd Fonts install (system-wide) for a default set.
   Use -AllNerdFonts to install the full Nerd Fonts collection (very large).
+
+Fixes in 2.5.4:
+- Detects OneDrive (if installed + path available) and ALSO copies the WindowsPowerShell profile pack to:
+  - %OneDrive%\Documents\WindowsPowerShell
+  while still copying to the local Documents\WindowsPowerShell.
 
 Run:
   powershell -NoProfile -ExecutionPolicy Bypass -File .\PS1nstaller.ps1
@@ -133,6 +138,48 @@ function Command-Exists {
     param([Parameter(Mandatory)][string]$Name)
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
+
+function Test-OneDriveInstalled {
+    # Best-effort check: OneDrive.exe exists in common install locations
+    $candidates = @()
+
+    if ($env:LOCALAPPDATA) {
+        $candidates += (Join-Path $env:LOCALAPPDATA 'Microsoft\OneDrive\OneDrive.exe')
+    }
+    if ($env:ProgramFiles) {
+        $candidates += (Join-Path $env:ProgramFiles 'Microsoft OneDrive\OneDrive.exe')
+    }
+    $pf86 = ${env:ProgramFiles(x86)}
+    if ($pf86) {
+        $candidates += (Join-Path $pf86 'Microsoft OneDrive\OneDrive.exe')
+    }
+
+    foreach ($p in $candidates) {
+        if ($p -and (Test-Path -LiteralPath $p)) { return $true }
+    }
+
+    return $false
+}
+
+function Get-OneDriveRoot {
+    # Prefer environment variables (handles OneDrive Personal + Business)
+    $candidates = @(
+        $env:OneDrive,
+        $env:OneDriveConsumer,
+        $env:OneDriveCommercial
+    ) | Where-Object { $_ -and $_.Trim() }
+
+    foreach ($p in $candidates) {
+        if (Test-Path -LiteralPath $p) { return $p }
+    }
+
+    # Fallback to default folder name
+    $fallback = Join-Path $env:USERPROFILE 'OneDrive'
+    if (Test-Path -LiteralPath $fallback) { return $fallback }
+
+    return $null
+}
+
 
 function Ensure-ExecutionPolicyRemoteSigned {
     $current = Get-ExecutionPolicy -Scope CurrentUser
@@ -316,67 +363,85 @@ function Install-ProfilePack {
 
     $root = Get-ChildItem -LiteralPath $extract -Directory | Select-Object -First 1
     if (-not $root) { throw "Could not find extracted profile folder under $extract" }
-
-    # If the repo contains a themes.zip, extract it to temp and copy it to: %USERPROFILE%\themes
+    # If the repo contains a themes.zip, extract it to temp and copy it to a universal folder: C:\OhmyposhThemes
     $themesZip = Get-ChildItem -LiteralPath $root.FullName -Recurse -File -Filter 'themes.zip' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($themesZip) {
-        $tempThemes = Join-Path $tempRoot 'Themes_Extracted'
+        $tempThemes = Join-Path $tempRoot 'OhMyPoshThemes_Temp'
         if (Test-Path -LiteralPath $tempThemes) {
             Remove-Item -LiteralPath $tempThemes -Recurse -Force -ErrorAction SilentlyContinue
         }
+        Ensure-Directory $tempThemes
 
-        Write-Status "  [UNZ ] Extracting themes.zip to temp..." 'Info'
+        Write-Status "  [UNZ ] Extracting themes.zip..." 'Info'
         Expand-Archive -Path $themesZip.FullName -DestinationPath $tempThemes -Force
 
-        $themesDest = Join-Path $env:USERPROFILE 'themes'
-        Ensure-Directory $themesDest
+        $themeTarget = 'C:\OhmyposhThemes'
+        Ensure-Directory $themeTarget
 
-        $themesBackupDir = Join-Path $themesDest ("Backup_" + (Get-Date -Format 'yyyyMMdd_HHmmss'))
         if ($OverwriteExisting) {
-            Ensure-Directory $themesBackupDir
-            Write-Status "  [BACK] Backing up existing themes -> $themesBackupDir" 'Warn'
-        }
+            $backup = "C:\OhmyposhThemes_Backup_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss')
+            Ensure-Directory $backup
 
-        Write-Status "  [COPY] Copying themes to $themesDest" 'Info'
+            $existing = Get-ChildItem -LiteralPath $themeTarget -Force -ErrorAction SilentlyContinue
+            if ($existing) {
+                Write-Status "  [BACK] Backing up existing themes -> $backup" 'Warn'
+                Copy-Item -Path (Join-Path $themeTarget '*') -Destination $backup -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -Path (Join-Path $themeTarget '*') -Recurse -Force -ErrorAction SilentlyContinue
+            }
 
-        # Copy files preserving folder structure
-        Get-ChildItem -LiteralPath $tempThemes -Recurse -File -Force | ForEach-Object {
-            $rel = $_.FullName.Substring($tempThemes.Length).TrimStart('\')
-            $destFile = Join-Path $themesDest $rel
-            $destDir  = Split-Path -Path $destFile -Parent
-            Ensure-Directory $destDir
+            Write-Status "  [COPY] Installing themes to $themeTarget (overwrite)..." 'Info'
+            Copy-Item -Path (Join-Path $tempThemes '*') -Destination $themeTarget -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Status "  [COPY] Installing themes to $themeTarget (skip existing)..." 'Info'
+            $srcFiles = Get-ChildItem -LiteralPath $tempThemes -File -Recurse -Force -ErrorAction SilentlyContinue
+            foreach ($sf in $srcFiles) {
+                $rel = $sf.FullName.Substring($tempThemes.Length).TrimStart('\')
+                $dest = Join-Path $themeTarget $rel
+                $destDir = Split-Path -Parent $dest
+                Ensure-Directory $destDir
 
-            if (Test-Path -LiteralPath $destFile) {
-                if ($OverwriteExisting) {
-                    # Backup existing file into backup dir (preserve structure)
-                    $bkFile = Join-Path $themesBackupDir $rel
-                    Ensure-Directory (Split-Path -Path $bkFile -Parent)
-                    Copy-Item -LiteralPath $destFile -Destination $bkFile -Force -ErrorAction SilentlyContinue
-
-                    Copy-Item -LiteralPath $_.FullName -Destination $destFile -Force
-                    Write-Status "  [OVRW] $rel" 'Warn'
+                if (Test-Path -LiteralPath $dest) {
+                    Write-Status "  [SKIP] Theme exists: $rel" 'Skip'
                 } else {
-                    Write-Status "  [SKIP] $rel exists" 'Skip'
+                    Copy-Item -LiteralPath $sf.FullName -Destination $dest -Force
+                    Write-Status "  [COPY] Theme: $rel" 'Ok'
                 }
-            } else {
-                Copy-Item -LiteralPath $_.FullName -Destination $destFile -Force
-                Write-Status "  [COPY] $rel" 'Ok'
             }
         }
 
-        # Cleanup extracted themes temp folder
         Remove-Item -LiteralPath $tempThemes -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Status "  [OK  ] Themes available at: C:\OhmyposhThemes" 'Ok'
     } else {
         Write-Status "  [SKIP] themes.zip not found in profile pack" 'Skip'
     }
 
 
-    # Install to BOTH profile locations so it works whether you launch pwsh or Windows PowerShell
-    $destWinPS = Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell'
-    $destPwsh  = Join-Path $env:USERPROFILE 'Documents\PowerShell'
 
-    Write-Status "  [COPY] Installing pack to Windows PowerShell profile dir..." 'Info'
-    Copy-ProfilePackTo -SourceDir $root.FullName -DestDir $destWinPS
+    # Install to BOTH profile locations so it works whether you launch pwsh or Windows PowerShell
+    $destWinPSLocal = Join-Path $env:USERPROFILE 'Documents\WindowsPowerShell'
+    $destPwsh       = Join-Path $env:USERPROFILE 'Documents\PowerShell'
+
+    Write-Status "  [COPY] Installing pack to Windows PowerShell profile dir (local Documents)..." 'Info'
+    Copy-ProfilePackTo -SourceDir $root.FullName -DestDir $destWinPSLocal
+
+    # If OneDrive is installed + path is available, also copy to OneDrive\Documents\WindowsPowerShell
+    if (Test-OneDriveInstalled) {
+        $oneDriveRoot = Get-OneDriveRoot
+        if ($oneDriveRoot) {
+            $oneDriveDocs = Join-Path $oneDriveRoot 'Documents'
+            if (Test-Path -LiteralPath $oneDriveDocs) {
+                $destWinPSOneDrive = Join-Path $oneDriveDocs 'WindowsPowerShell'
+                Write-Status "  [COPY] Installing pack to Windows PowerShell profile dir (OneDrive Documents)..." 'Info'
+                Copy-ProfilePackTo -SourceDir $root.FullName -DestDir $destWinPSOneDrive
+            } else {
+                Write-Status "  [SKIP] OneDrive detected but '$oneDriveDocs' not found. Skipping OneDrive copy." 'Skip'
+            }
+        } else {
+            Write-Status "  [SKIP] OneDrive installed but OneDrive root path not found. Skipping OneDrive copy." 'Skip'
+        }
+    } else {
+        Write-Status "  [SKIP] OneDrive not detected. Skipping OneDrive Documents copy." 'Skip'
+    }
 
     Write-Status "  [COPY] Installing pack to PowerShell 7 (pwsh) profile dir..." 'Info'
     Copy-ProfilePackTo -SourceDir $root.FullName -DestDir $destPwsh
@@ -384,7 +449,8 @@ function Install-ProfilePack {
     Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
 
     Write-Status "  [INFO ] Your active profile path depends on the shell:" 'Info'
-    Write-Status "         - Windows PowerShell 5.1:  $destWinPS" 'Info'
+    Write-Status "         - Windows PowerShell 5.1 (local):   $destWinPSLocal
+         - Windows PowerShell 5.1 (OneDrive): <OneDrive>\Documents\WindowsPowerShell (if present)" 'Info'
     Write-Status "         - PowerShell 7 (pwsh):     $destPwsh" 'Info'
 }
 
@@ -538,7 +604,7 @@ function Show-Banner {
     Write-Host "                     \____/_/|_/_/\__,_/\___/     "
     Write-Host ""
     Write-Status "[PS1nstaller]" 'Ok'
-    Write-Status "[Version 2.5.3]" 'Warn'
+    Write-Status "[Version 2.5.6]" 'Warn'
     Write-Host ""
 }
 
