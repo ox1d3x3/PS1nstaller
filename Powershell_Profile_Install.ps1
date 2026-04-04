@@ -1,7 +1,7 @@
 #requires -Version 5.1
 <#
 PS1nstaller - PowerShell profile/bootstrap installer
-Version: 2.6.0
+Version: 2.6.1
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -267,7 +267,9 @@ function Install-NerdFontsSystemWide {
             Ensure-Directory $extractDir
             Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
             
-            $fontFiles = Get-ChildItem -LiteralPath $extractDir -Include *.ttf,*.otf -Recurse
+            # STRICT FILTER: Only grab genuine font files, ignore README.md, LICENSE, etc.
+            $fontFiles = Get-ChildItem -LiteralPath $extractDir -File -Recurse | Where-Object { $_.Extension -match '\.(ttf|otf)$' }
+            
             foreach ($f in $fontFiles) {
                 if (-not (Test-Path (Join-Path $env:WINDIR "Fonts\$($f.Name)"))) {
                     $fontsFolder.CopyHere($f.FullName, 0x14)
@@ -302,7 +304,7 @@ Write-Host @"
                      / /_/ />  </ / /_/ /  __/     
                      \____/_/|_/_/\__,_/\___/     
 
-[PS1nstaller v2.6.0]
+[PS1nstaller v2.6.1]
 "@ -ForegroundColor Cyan
 Start-Sleep -Seconds 1
 
